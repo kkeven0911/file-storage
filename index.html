@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>在线编辑文档</title>
+    <!-- 引入金山WPS官方的网页预览引擎 -->
+   <!-- 替换掉原来的第 7 行，换成下面这两行 -->
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuidv4.min.js"></script>
+	<script src="https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.12/dingtalk.open.js"></script>
+	<script src="https://wdl1.cache.wps.cn/wps/download/WPS_WebOffice_SDK_v1.1.19.umd.js"></script>
+    <style>
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #top-bar { padding: 15px; background: #2f3542; color: white; display: flex; align-items: center; gap: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        #wps-view { flex: 1; width: 100%; background: #f1f2f6; }
+        .input-box { padding: 6px 10px; border-radius: 4px; border: none; width: 200px; }
+        .action-btn { padding: 8px 16px; background: #1e90ff; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        .action-btn:disabled { background: #747d8c; cursor: not-allowed; }
+        #log-text { font-size: 14px; color: #ced6e0; }
+    </style>
+</head>
+<body>
+
+    <div id="top-bar">
+        <!-- 如果你改了名字，在这里换掉文件名 -->
+        <span>📄 输入你要看的文件名：</span>
+        <input type="text" id="file-name-input" class="input-box" value="report.docx" placeholder="例如: report.docx">
+        
+        <button id="open-btn" class="action-btn" onclick="openDocument()">📂 打开文件</button>
+        <button id="save-btn" class="action-btn" style="background:#2ed573;" onclick="saveDocument()" disabled>💾 保存修改到GitHub</button>
+        
+        <span id="log-text">准备就绪，请输入文件名并点击打开。</span>
+    </div>
+    
+    <div id="wps-view"></div>
+
+    <script>
+        // ==================== 🛠️ 小白配置区域 🛠️ ====================
+        const MY_SETTINGS = {
+            token: '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',
+            owner: 'kkeven0911',
+            repo: 'file-storage' // 刚才我们在第二步建的仓库名
+        };
+        // ============================================================
+
+        let wpsApp = null;
+        let fileShaMark = null;
+
+        function getDocType(name) {
+            const ext = name.split('.').pop().toLowerCase();
+            if(['docx','doc'].includes(ext)) return { t: 'word', u: 'w' };
+            if(['xlsx','xls'].includes(ext)) return { t: 'spreadsheet', u: 's' };
+            if(['pptx','ppt'].includes(ext)) return { t: 'presentation', u: 'p' };
+            if(ext === 'pdf') return { t: 'pdf', u: 'f' };
+            return { t: 'word', u: 'w' };
+        }
+
+        async function openDocument() {
+            const fileName = document.getElementById('file-name-input').value.trim();
+            const log = document.getElementById('log-text');
+            const saveBtn = document.getElementById('save-btn');
+            
+            if(!fileName) return alert("请输入文件名！");
+            log.innerText = `正在连接 GitHub 并读取 [${fileName}]...`;
+
+            if (wpsApp) wpsApp.destroy();
+
+            try {
+                // 向 GitHub 索要文件下载地址
+                const api = `https://api.github.com/repos/${MY_SETTINGS.owner}/${MY_SETTINGS.repo}/contents/${fileName}`;
+                const res = await fetch(api, { headers: { 'Authorization': `token ${MY_SETTINGS.token}` } });
+                
+                if (!res.ok) throw new Error("找不到该文件，请检查文件名和GitHub配置是否正确！");
+                const fileInfo = await res.json();
+                
+                fileShaMark = fileInfo.sha;
+                const config = getDocType(fileInfo.name);
+
+                if(config.t === 'pdf') {
+                    saveBtn.disabled = true;
+                    log.innerText = "💡 提示：PDF文件在网页中仅支持纯预览，无法编辑保存。";
+                } else {
+                    saveBtn.disabled = false;
+                    log.innerText = "👉 可以在下方直接编辑，修改后记得点击绿色按钮保存！";
+                }
+
+                // 唤醒 WPS 网页渲染引擎
+                wpsApp = WebOfficeSDK.config({
+                    url: `https://wwo.wps.cn/office/${config.u}/${fileInfo.name}`,
+                    mount: document.querySelector('#wps-view'),
+                    fileInfo: {
+                        name: fileInfo.name,
+                        downloadUrl: fileInfo.download_url
+                    }
+                });
+
+            } catch (err) {
+                log.innerText = "❌ 错误: " + err.message;
+            }
+        }
+
+        async function saveDocument() {
+            const fileName = document.getElementById('file-name-input').value.trim();
+            const saveBtn = document.getElementById('save-btn');
+            const log = document.getElementById('log-text');
+            
+            if (!wpsApp) return;
+            saveBtn.disabled = true;
+            log.innerText = "正在从网页中提取最新的文件数据，请稍候...";
+
+            try {
+                const ext = fileName.split('.').pop().toLowerCase();
+                // 让WPS生成最新的文件
+                const blobData = await wpsApp.exportAsBlob({ fileType: ext });
+                log.innerText = "正在将新文件打包并推送到 GitHub 仓库...";
+
+                const reader = new FileReader();
+                reader.readAsDataURL(blobData);
+                reader.onloadend = async () => {
+                    const base64Str = reader.result.split(',')[1];
+                    const api = `https://api.github.com/repos/${MY_SETTINGS.owner}/${MY_SETTINGS.repo}/contents/${fileName}`;
+                    
+                    const putRes = await fetch(api, {
+                        method: 'PUT',
+                        headers: { 'Authorization': `token ${MY_SETTINGS.token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            message: "通过网页版工作台修改文件",
+                            content: base64Str,
+                            sha: fileShaMark
+                        })
+                    });
+
+                    const resJson = await putRes.json();
+                    if (putRes.ok) {
+                        fileShaMark = resJson.content.sha;
+                        log.innerText = "✨ 恭喜！保存成功，GitHub 仓库文件已同步更新。";
+                    } else {
+                        log.innerText = "❌ 同步失败: " + resJson.message;
+                    }
+                    saveBtn.disabled = false;
+                };
+            } catch (err) {
+                log.innerText = "❌ 操作失败: " + err.message;
+                saveBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
