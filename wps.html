@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>在线编辑</title>
+    <!-- 引入 WPS 官方全量 Web SDK -->
+    <script src="https://web.sdk.wps.cn/js/v1/web-office-sdk-v1.1.19.umd.js"></script>
+    <style>
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
+        #toolbar { padding: 12px; background: #eaecf0; border-bottom: 1px solid #cfd4dc; display: flex; align-items: center; gap: 15px; }
+        #wps-container { flex: 1; width: 100%; background: #f8f9fa; }
+        .btn { padding: 8px 16px; background: #2f54eb; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        .btn:disabled { background: #bfbfbf; cursor: not-allowed; }
+        #file-selector { padding: 6px; border-radius: 4px; border: 1px solid #ccc; }
+        #status-text { color: #434343; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+    <div id="toolbar">
+        <!-- 文件切换下拉框，可以手动输入或切换你仓库里的文件 -->
+        <label for="file-selector">📁 选择文件：</label>
+        <select id="file-selector" onchange="switchFile(this.value)">
+            <option value="docs/report.docx">我的文档.docx (Word)</option>
+            <option value="sheets/data.xlsx">财务报表.xlsx (Excel)</option>
+            <option value="presentations/slide.pptx">演示文稿.pptx (PPT)</option>
+            <option value="books/manual.pdf">产品手册.pdf (PDF预览)</option>
+        </select>
+
+        <button id="save-btn" class="btn" onclick="saveToGitHub()">💾 保存修改到 GitHub</button>
+        <span id="status-text">正在初始化...</span>
+    </div>
+    
+    <div id="wps-container"></div>
+
+    <script>
+        // 1. 配置你的 GitHub 核心凭证
+        const GH_CONFIG = {
+            token: '你的ghp_开头的GitHubToken',
+            owner: '你的GitHub用户名',
+            repo: '你的仓库名'
+        };
+
+        let wpsInstance = null;
+        let currentFileSha = null; 
+        let currentPath = "";
+
+        // 2. 根据文件后缀名，自动匹配 WPS 的组件类型和预览模式
+        function getWpsConfig(fileName) {
+            const ext = fileName.split('.').pop().toLowerCase();
+            switch (ext) {
+                case 'docx': case 'doc':
+                    return { type: 'word', urlType: 'w' }; // Word 模式
+                case 'xlsx': case 'xls':
+                    return { type: 'spreadsheet', urlType: 's' }; // Excel 模式
+                case 'pptx': case 'ppt':
+                    return { type: 'presentation', urlType: 'p' }; // PPT 模式
+                case 'pdf':
+                    return { type: 'pdf', urlType: 'f', mode: 'simple' }; // PDF 预览模式
+                default:
+                    return { type: 'word', urlType: 'w' };
+            }
+        }
+
+        // 3. 核心：从 GitHub 加载目标文件并渲染
+        async function loadFileFromGitHub(path) {
+            currentPath = path;
+            const status = document.getElementById('status-text');
+            const saveBtn = document.getElementById('save-btn');
+            status.innerText = `正在从 GitHub 读取 ${path}...`;
+            
+            // 如果之前有打开的实例，先销毁
+            if (wpsInstance) {
+                wpsInstance.destroy();
+            }
+
+            try {
+                // 请求 GitHub API 获取文件直链
+                const ghUrl = `https://api.github.com/repos/${GH_CONFIG.owner}/${GH_CONFIG.repo}/contents/${path}`;
+                const res = await fetch(ghUrl, {
+                    headers: { 'Authorization': `token ${GH_CONFIG.token}` }
+                });
+                
+                if (!res.ok) throw new Error("文件不存在或 Token 错误");
+                const fileData = await res.json();
+                
+                currentFileSha = fileData.sha; // 记录当前版本 SHA
+                const config = getWpsConfig(fileData.name);
+
+                // 如果是 PDF，禁用保存按钮（PDF 在网页端只能预览，无法直接编辑修改）
+                if (config.type === 'pdf') {
+                    saveBtn.style.display = 'none';
+                    status.innerText = "PDF 模式：仅支持在线预览";
+                } else {
+                    saveBtn.style.display = 'inline-block';
+                    saveBtn.disabled = false;
+                    status.innerText = "编辑模式：修改后请点击保存按钮同步至 GitHub";
+                }
+
+                // 初始化 WPS 实例
+                wpsInstance = WebOfficeSDK.config({
+                    // 动态拼接 WPS 组件路由 (w=Word, s=Excel, p=PPT, f=PDF)
+                    url: `https://wwo.wps.cn/office/${config.urlType}/${fileData.name}`,
+                    mount: document.querySelector('#wps-container'),
+                    fileInfo: {
+                        name: fileData.name,
+                        downloadUrl: fileData.download_url // 喂给 WPS 的 GitHub 公网直链
+                    }
+                });
+
+            } catch (err) {
+                status.style.color = "red";
+                status.innerText = "加载失败: " + err.message;
+            }
+        }
+
+        // 4. 核心：提取 WPS 内存文件并推回 GitHub
+        async function saveToGitHub() {
+            const btn = document.getElementById('save-btn');
+            const status = document.getElementById('status-text');
+            if (!wpsInstance) return;
+            
+            btn.disabled = true;
+            status.innerText = "正在提取最新文档数据...";
+
+            try {
+                // 动态获取当前文件的后缀名，让 WPS 导出对应的正确二进制流
+                const ext = currentPath.split('.').pop().toLowerCase();
+                const fileBlob = await wpsInstance.exportAsBlob({ fileType: ext });
+                
+                status.innerText = "正在同步至 GitHub 仓库...";
+
+                const reader = new FileReader();
+                reader.readAsDataURL(fileBlob);
+                reader.onloadend = async () => {
+                    const base64Data = reader.result.split(',')[1];
+
+                    const ghUrl = `https://api.github.com/repos/${GH_CONFIG.owner}/${GH_CONFIG.repo}/contents/${currentPath}`;
+                    const putRes = await fetch(ghUrl, {
+                        method: 'PUT',
+                        headers: {
+                            'Authorization': `token ${GH_CONFIG.token}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            message: `WPS 工作台自动更新文件: ${currentPath}`,
+                            content: base64Data,
+                            sha: currentFileSha // 携带 SHA 保证增量覆盖
+                        })
+                    });
+
+                    const result = await putRes.json();
+                    if (putRes.ok) {
+                        currentFileSha = result.content.sha; // 极为重要：原地更新 SHA，防止下一次保存冲突
+                        status.innerText = "✨ 保存成功！GitHub 仓库已同步更新。";
+                    } else {
+                        status.innerText = "同步失败: " + result.message;
+                    }
+                    btn.disabled = false;
+                };
+            } catch (err) {
+                status.innerText = "操作失败: " + err.message;
+                btn.disabled = false;
+            }
+        }
+
+        // 切换下拉框时触发
+        function switchFile(path) {
+            loadFileFromGitHub(path);
+        }
+
+        // 页面首次加载时，默认读取下拉框第一个文件
+        window.onload = () => {
+            const defaultPath = document.getElementById('file-selector').value;
+            loadFileFromGitHub(defaultPath);
+        };
+    </script>
+</body>
+</html>
